@@ -1,0 +1,1009 @@
+最终代码：
+1.TCGA 差异基因分析：
+Sys.setenv(LANGUAGE = "en")
+options(stringsAsFactors = FALSE)
+rm(list=ls())
+setwd("/home/bsb/Documents/graduation-design/bulk/TCGABRCA/")
+set.seed(2023)
+library(data.table)
+library(dplyr)
+library(tidyverse)
+###读取表达谱信息 rnaseq 的数据
+count=fread("TCGA-BRCA.htseq_counts.tsv.gz",header = T, sep =
+'\t',data.table = F)
+View(count)
+dim(count)
+####读取探针信息 ，目的是为了将 ensemble 名字转为基因名
+pro=fread("gencode.v22.annotation.gene.probeMap",header = T, sep =
+'\t',data.table = F)
+View(pro)
+pro=pro[,c(1,2)]
+View(pro)
+###用 merge 函数将探针转化的信息和表达谱信息进行合并
+countpro=merge(pro,count,by.y ="Ensembl_ID",by.x = "id" )
+View(countpro)
+exp=countpro[,-c(1)]
+View(exp)
+#利用 limma 包取平均值
+library(limma)
+exp=as.data.frame(avereps(exp[,-1],ID=exp$gene))
+dim(exp)
+#还原原始 count
+explog=2^exp-1
+#读取列名
+metadata <- data.frame(TCGA_id =colnames(explog))
+table(substring(metadata$TCGA_id,14,15))
+sample <-
+ifelse(substring(metadata$TCGA_id,14,15)=="11","normal","cancer")
+#factor 是 dds 需要
+metadata$sample <- as.factor(sample)
+view(metadata)
+library(DESeq2)
+dds <-DESeqDataSetFromMatrix(countData=round(explog),
+colData=metadata,
+design=~sample)
+dds <- DESeq(dds)
+#如果需要转录组的表达矩阵做 PCA，WGCNA,CLUSTERING 等分析，需要 vst 标准化
+#继续耐心等待
+vsd <- vst(dds, blind = FALSE)
+#用 Deseq2 内置的主成分分析来看一下样本分布
+plotPCA(vsd, "sample")
+#获取标准化后的数据,这一步会自动过滤掉不符合规定的基因
+mRNA_exprSet <- as.data.frame(assay(vsd))
+save(dds,file="mRNA_exprSet_dds_sample.RData")
+save(mRNA_exprSet,file='mRNA_exprset_norm.RData')
+write.csv(mRNA_exprSet, file = "mRNA_exprset_norm.csv",sep=",",
+row.names = T,quote = F)
+#如果需要差异分析
+expr_for_diff <- results(dds, tidy=TRUE)
+#确定上调还是下调
+#单基因差异分析
+plot_data<-data.frame(mRNA_exprSet['CSAG1',])
+plot_data<-t(plot_data)
+plot_data<-data.frame(plot_data)
+plot_data <- cbind(plot_data,sample=metadata$sample)
+#单基因表达可视化
+library(ggplot2)
+p<-ggplot(plot_data,aes(x=sample,y=CSAG1,fill=sample))+
+geom_boxplot()+
+theme_classic()+
+ggpubr::stat_compare_means(color="red")+
+ggsci::scale_fill_jco()+
+theme(legend.position = "none")+
+ylab("CSAG1 counts")
+p
+normalmarker=subset(expr_for_diff,log2FoldChange>0)
+cancermarker=subset(expr_for_diff,log2FoldChange<0)
+save(normalmarker,file='normalmarker.RData')
+save(cancermarker,file='cancermarker.RData')
+2.GSE109169 差异基因分析：
+Sys.setenv(LANGUAGE = "en")
+options(stringsAsFactors = FALSE)
+rm(list=ls())
+library(GEOquery)
+library(dplyr)
+library(tidyverse)
+setwd("/home/bsb/Documents/graduation-design/bulk/GSE109169/")
+set.seed(2023)
+gset = getGEO('GSE109169', destdir=".",getGPL =T)
+show(gset)
+gset=gset[[1]]
+#表达矩阵
+exp <- exprs(gset)
+View(exp)
+boxplot(exp)
+#临床信息
+pdata=pData(gset)
+View(pdata)
+#平台
+gpl=fData(gset)
+View(gpl)
+gpl=gpl[,c(1,10)]
+#合并平台和表达
+exp=as.data.frame(exp)
+exp.pl=merge(gpl,exp,by.x=1,by.y=0)
+x=exp.pl$gene_assignment
+a1=strsplit(x,split = " // ",fixed = T) #T 表示精准匹配
+gene.all = sapply(a1,function(x){x[2]})
+exp.pl$`Gene Symbol`=gene.all
+exp.pl=exp.pl[,c(53,1:52)]
+exp.pl=exp.pl[,-c(2,3)]
+library(limma)
+exp.pl=as.data.frame(avereps(exp.pl[,-1],ID=exp.pl$`Gene Symbol`))
+##查看分组信息
+View(pdata)
+pdata=pdata[,c(2,8)]
+normal=c(1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,
+45,47,49)
+cancer=normal+1
+exp2=exp.pl[,c(normal,cancer)]
+View(exp2)
+##这里我们创建分组信息，意思就是前面是 control，后面是处理
+group_list=c(rep('control',25),rep('cancer',25))
+##转化为因子 这里可以不用理解 为了后面差异分析的矩阵构建
+group_list=factor(group_list)
+## 强制限定顺序
+group_list <- relevel(group_list, ref="control")
+boxplot(exp2,outline=FALSE, notch=T,col=group_list, las=2)
+exp3=normalizeBetweenArrays(exp2)
+boxplot(exp3,outline=FALSE, notch=T,col=group_list, las=2)
+library(RColorBrewer)
+colors<-brewer.pal(25,"Set3") #生成一组颜色
+colors
+boxplot(exp3,col=colors,notch=T,outline=FALSE, las=3,ylim=c(2,10))
+##构建差异分析的矩阵
+design=model.matrix(~ group_list) #~跟着 factor 因子，不能是向量。0~或者~，
+不加 0 表示第一列作为 control 列，第二列和第一列比较
+View(design)
+colnames(design) <- levels(group_list)
+rownames(design) <- colnames(exp2)
+##lmFit()：线性拟合模型构建
+fit=lmFit(exp3,design)
+##eBayes()使用 trend=TRUE 对标准误差进行经验贝叶斯平滑，计算每个对比中每个基
+因的 moderated t-statistic 和 log-odds。
+fit=eBayes(fit)
+##topTable()给出一个最有可能在给定对比下差异表达的基因列表。
+##topTable 函数的 coef 参数，coef=2 是指 design 的第 2 列，即 tumour，即把 tumour
+与 normal 进行对比
+allDiff=topTable(fit,coef=2,adjust='fdr',number=Inf) #2 代表第二列与第一
+列相比，fdr 代表矫正的 p 值
+View(allDiff)
+write.table(allDiff,file = "allDiff.txt",sep = "\t",col.names = NA)#不
+加 col.names = NA 的话列名会前移
+#也可以保存为 csv
+write.csv(allDiff,file = "allDiff.csv")
+#单基因差异分析
+example=exp2[c('CST1','FABP4'),]
+View(example)
+tumormarker2=subset(allDiff,logFC>0)
+normalmarker2=subset(allDiff,logFC<0)
+save(normalmarker2,file='normalmarker2.RData')
+save(tumormarker2,file='cancermarker2.RData')
+3.GSE93601 差异基因分析：
+Sys.setenv(LANGUAGE = "en")
+options(stringsAsFactors = FALSE)
+rm(list=ls())
+library(GEOquery)
+library(dplyr)
+library(tidyverse)
+setwd("/home/bsb/Documents/graduation-design/bulk/GSE93601/")
+set.seed(2023)
+gset = getGEO('GSE93601', destdir=".",getGPL =T)
+show(gset)
+gset=gset[[1]]
+#表达矩阵
+exp <- exprs(gset)
+View(exp)
+#临床信息
+pdata=pData(gset)
+View(pdata)
+#平台
+gpl=fData(gset)
+View(gpl)
+gpl=gpl[,c(1,2)]
+gpl=gpl[gpl[,"ENTREZ_GENE_ID"]!="",]
+###将 entrez id 转为 gene symbol
+library(org.Hs.eg.db)
+###查看一下有哪些基因 ID
+keytypes(org.Hs.eg.db)
+x1=gpl$ENTREZ_GENE_ID
+x1=as.character(x1)
+x2=AnnotationDbi::select(org.Hs.eg.db, keys=x1, columns=c("ENTREZID",
+"SYMBOL"), keytype="ENTREZID")#keys 要和 keytype 类型对应
+View(x2)
+gpl=merge(gpl,x2,by.x=2,by.y=1)
+gpl2=gpl[,c(2,3)]
+###平台和表达矩阵合并
+exp=as.data.frame(exp)
+exp.pl=merge(gpl2,exp,by.x=1,by.y=0)
+exp.pl=exp.pl[,-c(1)]
+library(limma)
+exp.pl=as.data.frame(avereps(exp.pl[,-1],ID=exp.pl$SYMBOL))
+##查看分组信息
+View(pdata)
+pdata=pdata[,c(2,10)]
+normal=filter(pdata,characteristics_ch1=="tissue: breast tumor-adjacent
+normal")
+cancer=filter(pdata,characteristics_ch1=="tissue: breast tumor")
+exp2=exp.pl[,c(normal[,c(1)],cancer[,c(1)])]
+##这里我们创建分组信息，意思就是前面是 control，后面是处理
+group_list=c(rep('control',508),rep('T',602))
+##转化为因子 这里可以不用理解 为了后面差异分析的矩阵构建
+group_list=factor(group_list)
+## 强制限定顺序
+group_list <- relevel(group_list, ref="control")
+exp3=exp2[,c(1:10,1000:1010)]
+boxplot(exp3,outline=FALSE, notch=T,col=group_list, las=2)
+exp4=normalizeBetweenArrays(exp2)
+exp5=exp4[,c(1:10,1000:1010)]
+boxplot(exp5,outline=FALSE, notch=T,col=group_list, las=2)
+library(RColorBrewer)
+colors<-brewer.pal(1100,"Set3") #生成一组颜色
+colors
+boxplot(exp5,col=colors,notch=T,outline=FALSE, las=3,ylim=c(2,10))
+##构建差异分析的矩阵
+design=model.matrix(~ group_list) #~跟着 factor 因子，不能是向量。0~或者~，
+不加 0 表示第一列作为 control 列，第二列和第一列比较
+View(design)
+colnames(design) <- levels(group_list)
+rownames(design) <- colnames(exp2)
+##lmFit()：线性拟合模型构建
+fit=lmFit(exp4,design)
+##eBayes()使用 trend=TRUE 对标准误差进行经验贝叶斯平滑，计算每个对比中每个基
+因的 moderated t-statistic 和 log-odds。
+fit=eBayes(fit)
+##topTable()给出一个最有可能在给定对比下差异表达的基因列表。
+##topTable 函数的 coef 参数，coef=2 是指 design 的第 2 列，即 tumour，即把 tumour
+与 normal 进行对比
+allDiff=topTable(fit,coef=2,adjust='fdr',number=Inf) #2 代表第二列与第一
+列相比，fdr 代表矫正的 p 值
+View(allDiff)
+write.table(allDiff,file = "allDiff.txt",sep = "\t",col.names = NA)#不
+加 col.names = NA 的话列名会前移
+#也可以保存为 csv
+write.csv(allDiff,file = "allDiff.csv")
+#验证 logFC 与上调下调的关系
+example=exp2[c('FN1','FABP4'),]
+View(example)
+mean(as.matrix(example[1,c(1:508)]))
+mean(as.matrix(example[1,c(509:1100)]))
+mean(as.matrix(example[2,c(1:508)]))
+mean(as.matrix(example[2,c(509:1100)]))
+tumormarker3=subset(allDiff,logFC>0)
+normalmarker3=subset(allDiff,logFC<0)
+save(normalmarker3,file='normalmarker3.RData')
+save(tumormarker3,file='cancermarker3.RData')
+4.GSE65194 差异基因分析：
+Sys.setenv(LANGUAGE = "en")
+options(stringsAsFactors = FALSE)
+rm(list=ls())
+library(GEOquery)
+library(dplyr)
+library(tidyverse)
+setwd("/home/bsb/Documents/graduation-design/bulk/GSE65194/")
+set.seed(2023)
+gset = getGEO('GSE65194', destdir=".",getGPL =T)
+show(gset)
+gset=gset[[1]]
+#表达矩阵
+exp <- exprs(gset)
+View(exp)
+min_val <- min(exp)
+exp=as.data.frame(exp)
+exp=exp+1.23
+min_val <- min(exp)
+#临床信息
+pdata=pData(gset)
+View(pdata)
+#平台
+gpl=fData(gset)
+View(gpl)
+gpl=gpl[,c(1,11)]
+gpl=gpl[gpl[,"Gene Symbol"]!="",]
+#合并平台和表达
+exp.pl=merge(gpl,exp,by.x=1,by.y=0)
+x=exp.pl$`Gene Symbol`
+a1=strsplit(x,split = " /// ",fixed = T) #T 表示精准匹配
+gene.all = sapply(a1,function(x){x[1]})
+exp.pl$`Gene Symbol`=gene.all
+exp.pl=exp.pl[,-c(1)]
+library(limma)
+exp.pl=as.data.frame(avereps(exp.pl[,-1],ID=exp.pl$`Gene Symbol`))
+##查看分组信息
+View(pdata)
+table(pdata$`sample_group:ch1`)
+pdata=pdata[,c(2,40)]
+colnames(pdata)[2]='group'
+normal=filter(pdata,group=='Healthy')
+TNBC=filter(pdata,group=='TNBC')
+CellLine=filter(pdata,group=='CellLine')
+luminalA=filter(pdata,group=='Luminal A')
+luminalB=filter(pdata,group=='Luminal B')
+Her2=filter(pdata,group=='Her2')
+exp2=exp.pl[,c(normal[,c(1)],TNBC[,c(1)],CellLine[,c(1)],luminalA[,c(1)
+],luminalB[,c(1)],Her2[,c(1)])]
+##这里我们创建分组信息，意思就是前面是 control，后面是处理
+group_list=c(rep('control',11),rep('cancer',167))
+##转化为因子 这里可以不用理解 为了后面差异分析的矩阵构建
+group_list=factor(group_list)
+## 强制限定顺序
+group_list <- relevel(group_list, ref="control")
+boxplot(exp2,outline=FALSE, notch=T,col=group_list, las=2)
+library(RColorBrewer)
+colors<-brewer.pal(25,"Set3") #生成一组颜色
+colors
+boxplot(exp2,col=colors,notch=T,outline=FALSE, las=3,ylim=c(2,10))
+##构建差异分析的矩阵
+design=model.matrix(~ group_list) #~跟着 factor 因子，不能是向量。0~或者~，
+不加 0 表示第一列作为 control 列，第二列和第一列比较
+View(design)
+colnames(design) <- levels(group_list)
+rownames(design) <- colnames(exp2)
+##lmFit()：线性拟合模型构建
+fit=lmFit(exp2,design)
+##eBayes()使用 trend=TRUE 对标准误差进行经验贝叶斯平滑，计算每个对比中每个基
+因的 moderated t-statistic 和 log-odds。
+fit=eBayes(fit)
+##topTable()给出一个最有可能在给定对比下差异表达的基因列表。
+##topTable 函数的 coef 参数，coef=2 是指 design 的第 2 列，即 tumour，即把 tumour
+与 normal 进行对比
+allDiff=topTable(fit,coef=2,adjust='fdr',number=Inf) #2 代表第二列与第一
+列相比，fdr 代表矫正的 p 值
+View(allDiff)
+write.table(allDiff,file = "allDiff.txt",sep = "\t",col.names = NA)#不
+加 col.names = NA 的话列名会前移
+#也可以保存为 csv
+write.csv(allDiff,file = "allDiff.csv")
+#单基因差异分析
+example=exp2[c('S100P','ADIPOQ'),]
+View(example)
+mean(as.matrix(example[1,c(1:11)]))
+mean(as.matrix(example[1,c(11:178)]))
+mean(as.matrix(example[2,c(1:11)]))
+mean(as.matrix(example[2,c(11:178)]))
+tumormarker4=subset(allDiff,logFC>0)
+normalmarker4=subset(allDiff,logFC<0)
+save(normalmarker4,file='normalmarker4.RData')
+save(tumormarker4,file='cancermarker4.RData')
+5.bulk 差异基因整合并排名：
+Sys.setenv(LANGUAGE = "en")
+options(stringsAsFactors = FALSE)
+rm(list=ls())
+setwd('/home/bsb/Documents/graduation-design/bulk/')
+set.seed(2023)
+#install.packages("RobustRankAggreg")
+library(RobustRankAggreg)
+#读取
+load('TCGABRCA/cancermarker.RData')
+load('GSE109169/cancermarker2.RData')
+load('GSE93601/cancermarker3.RData')
+load('GSE65194/cancermarker4.RData')
+load('TCGABRCA/normalmarker.RData')
+load('GSE109169/normalmarker2.RData')
+load('GSE93601/normalmarker3.RData')
+load('GSE65194/normalmarker4.RData')
+#排序
+library(dplyr)
+cancer1=arrange(cancermarker,log2FoldChange)
+cancer2=arrange(tumormarker2,desc(logFC))
+cancer3=arrange(tumormarker3,desc(logFC))
+cancer4=arrange(tumormarker4,desc(logFC))
+normal1=arrange(normalmarker,desc(log2FoldChange))
+normal2=arrange(normalmarker2,logFC)
+normal3=arrange(normalmarker3,logFC)
+normal4=arrange(normalmarker4,logFC)
+#过滤 p 值
+cancer1=subset(cancer1,padj<0.05)
+normal1=subset(normal1,padj<0.05)
+cancer2=subset(cancer2,adj.P.Val<0.05)
+normal2=subset(normal2,adj.P.Val<0.05)
+cancer3=subset(cancer3,adj.P.Val<0.05)
+normal3=subset(normal3,adj.P.Val<0.05)
+cancer4=subset(cancer4,adj.P.Val<0.05)
+normal4=subset(normal4,adj.P.Val<0.05)
+#开始排序
+c1=cancer1$row
+c2=rownames(cancer2)
+c3=rownames(cancer3)
+c4=rownames(cancer4)
+cancerlist=list(c1,c2,c3,c4)
+cancersign=aggregateRanks(glist = cancerlist)
+n1=normal1$row
+n2=rownames(normal2)
+n3=rownames(normal3)
+n4=rownames(normal4)
+normallist=list(n1,n2,n3,n4)
+normalsign=aggregateRanks(glist = normallist)
+cancersign=subset(cancersign,Score<0.05)
+normalsign=subset(normalsign,Score<0.05)
+save(cancersign,file='./RobustRank/cancersign.RData')
+save(normalsign,file='./RobustRank/normalsign.RData')
+#venn 图
+library(gplots)
+venn(cancerlist)
+venn(normallist)
+library(VennDiagram)
+?venn.diagram
+venn.plot <- venn.diagram(
+x = list(
+TCGA_BRCA= cancer1$row,
+GSE109169=rownames(cancer2),
+GSE93601=rownames(cancer3),
+GSE65194=rownames(cancer4)
+),
+filename = NULL,
+col = "black",
+lty = "dotted", #边框线型改为"dotted"虚线
+lwd = 3, # 边框线的宽度
+fill = c("cornflowerblue", "green", "yellow", "darkorchid1"),
+alpha = 0.50,
+label.col = c("orange", "white", "darkorchid4", "white", "white",
+"white",
+"white", "white", "darkblue", "white",
+"white", "white", "white", "darkgreen", "white"),
+cex = 1.5,
+fontfamily = "serif",
+fontface = "bold",
+cat.col = c("darkblue", "darkgreen", "orange", "darkorchid4"),
+cat.cex = 1,
+cat.fontface = "bold",
+cat.fontfamily = "serif"
+)
+grid.newpage()
+grid.draw(venn.plot)
+venn.plot2 <- venn.diagram(
+x = list(
+TCGA_BRCA= normal1$row,
+GSE109169=rownames(normal2),
+GSE93601=rownames(normal3),
+GSE65194=rownames(normal4)
+),
+filename = NULL,
+col = "black",
+lty = "dotted", #边框线型改为"dotted"虚线
+lwd = 3, # 边框线的宽度
+fill = c("cornflowerblue", "green", "yellow", "darkorchid1"),
+alpha = 0.50,
+label.col = c("orange", "white", "darkorchid4", "white", "white",
+"white",
+"white", "white", "darkblue", "white",
+"white", "white", "white", "darkgreen", "white"),
+cex = 1.5,
+fontfamily = "serif",
+fontface = "bold",
+cat.col = c("darkblue", "darkgreen", "orange", "darkorchid4"),
+cat.cex = 1,
+cat.fontface = "bold",
+cat.fontfamily = "serif"
+)
+grid.newpage()
+grid.draw(venn.plot2)
+6.单细胞分析：
+##系统报错改为英文
+Sys.setenv(LANGUAGE = "en")
+##禁止转化为因子
+options(stringsAsFactors = FALSE)
+##清空环境
+rm(list=ls())
+#设置工作路径
+getwd()
+setwd('/home/bsb/Documents/graduation-design/scRNA/GSM5956094/')
+set.seed(2023)
+#加载需要的包
+library(Seurat)
+library(tidyverse)
+library(dplyr)
+library(patchwork)
+#读取
+scRNA.counts=Read10X('./')
+scRNA=CreateSeuratObject(scRNA.counts,min.cells = 3,project =
+'BC.B',min.features = 500)
+#线粒体
+scRNA[['percent.mt']]<-PercentageFeatureSet(scRNA,pattern = '^MT-')
+#计算红细胞比例
+HB.genes<-c('HBA1','HBA2','HBB','HBD','HBE1','HBG1','HBG2','HBM','HBQ1
+','HBZ')
+HB_m <- match(HB.genes, rownames(scRNA@assays$RNA))
+HB.genes <- rownames(scRNA@assays$RNA)[HB_m]
+HB.genes <- HB.genes[!is.na(HB.genes)]
+scRNA[["percent.HB"]]<-PercentageFeatureSet(scRNA, features=HB.genes)
+#View(scRNA@meta.data)
+#画图
+col.num<-length(levels(scRNA@active.ident))
+rainbow(col.num)
+violin <- VlnPlot(scRNA,
+features = c("nFeature_RNA", "nCount_RNA",
+"percent.mt","percent.HB"),
+cols =rainbow(col.num),
+pt.size = 0.01, #不需要显示点，可以设置 pt.size = 0
+ncol = 4) +
+theme(axis.title.x=element_blank(), axis.text.x=element_blank(),
+axis.ticks.x=element_blank())
+violin
+###这几个指标之间的相关性。 把图画到画板上，然后手动保存
+plot1=FeatureScatter(scRNA, feature1 = "nCount_RNA", feature2 =
+"percent.mt")
+plot2=FeatureScatter(scRNA, feature1 = "nCount_RNA", feature2 =
+"nFeature_RNA")
+plot3=FeatureScatter(scRNA, feature1 = "nCount_RNA", feature2 =
+"percent.HB")
+pearplot <- CombinePlots(plots = list(plot1, plot2, plot3), nrow=1,
+legend="none")
+plot1
+####看画板
+plot2
+plot3
+pearplot
+#过滤，nFeature_RNA<和 nCount_RNA <可以不加，目的是去离群值
+scRNA1 <- subset(scRNA, subset = nFeature_RNA < 5000 & percent.mt < 15 &
+percent.HB < 1 & nCount_RNA < 40000)
+scRNA
+scRNA1
+expB <- as.data.frame(scRNA1[["RNA"]]@counts)
+save(expB,file = '../SCTB/expB.RData')
+write.table(expB,'../SCTB/expB.txt',sep = '\t')
+#SCTransform
+scRNA1 <- SCTransform(scRNA1, vars.to.regress = "percent.mt", verbose =
+FALSE)#排除线粒体影响归一化
+##运行的结果存储在：
+scRNA1@assays$SCT
+#或者
+scRNA1[["SCT"]]
+scRNA1 <- RunPCA(scRNA1, features = VariableFeatures(scRNA1))
+plot4 <- DimPlot(scRNA1, reduction = "pca", group.by="orig.ident")
+plot4
+ElbowPlot(scRNA1, ndims=50, reduction="pca")
+pc.num=1:33
+#细胞聚类
+scRNA1 <- FindNeighbors(scRNA1, dims = pc.num)
+library(clustree)
+objB=scRNA1
+objB<-FindClusters(objB,resolution=seq(0.1,1.2,by=0.05))
+clustree(objB)
+###这个分辨率是可以自定义的，当我们的样本细胞数较大时候 resolution 要高一些，
+一般情况 2 万细胞以上都是大于 1.0 的
+scRNA1 <- FindClusters(scRNA1, resolution = 0.2)
+#TSNE
+scRNA1 = RunTSNE(scRNA1, dims = pc.num)
+###label = TRUE 把注释展示在图中
+DimPlot(scRNA1, reduction = "tsne",label = TRUE)
+#UMAP---第二种可视化降维
+scRNA1 <- RunUMAP(scRNA1, dims = pc.num)
+DimPlot(scRNA1, reduction = "umap")
+save(scRNA1,file='../SCTB/scRNA1.RData')
+rm(list=ls())
+load('../SCTB/scRNA1.RData')
+pc.num=1:33
+#去双胞
+library(DoubletFinder)
+#这是一个测试最佳参数的过程，运行速度慢
+sweep.res.list <- paramSweep_v3(scRNA1, PCs = pc.num, sct = T)
+#使用 log 标准化，sct 参数设置为 sct = F（默认 ）,如使用 SCT 标准化方法，设置为
+T
+sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)
+bcmvn <- find.pK(sweep.stats) #可以看到最佳参数的点
+pK_bcmvn <- bcmvn$pK[which.max(bcmvn$BCmetric)] %>% as.character() %>%
+as.numeric() #提取最佳 pk 值
+## 排除不能检出的同源 doublets，优化期望的 doublets 数量
+DoubletRate = ncol(scRNA1)*8*1e-6 #通用数量
+#估计同源双细胞比例，根据 modelHomotypic()中的参数人为混合双细胞。这里是从
+seurat_clusters 中来混双细胞
+homotypic.prop <- modelHomotypic(scRNA1$seurat_clusters)
+# 计算双细胞比例
+nExp_poi <- round(DoubletRate*ncol(scRNA1))
+# 使用同源双细胞比例对计算的双细胞比例进行校正
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+## 使用确定好的参数鉴定 doublets
+scRNA1<- doubletFinder_v3(scRNA1, PCs = pc.num, pN = 0.25, pK = pK_bcmvn,
+nExp = nExp_poi.adj, reuse.pANN = F, sct = T)
+## 结果展示，分类结果在 scRNA_harmony@meta.data 中
+colnames(scRNA1@meta.data)
+DimPlot(scRNA1, reduction = "umap", group.by =
+"DF.classifications_0.25_0.02_630")
+save(scRNA1,file='../SCTB/scRNA2.RData')
+View(scRNA1@meta.data)
+table(scRNA1@meta.data$DF.classifications_0.25_0.02_630)
+scRNA1=subset(scRNA1,DF.classifications_0.25_0.02_630=='Singlet')
+scRNA1 <- FindNeighbors(scRNA1, dims = pc.num)
+scRNA1 <- FindClusters(scRNA1, resolution = 0.2)
+#SingleR 注释
+library(celldex)
+refdata<-celldex::HumanPrimaryCellAtlasData()
+save(refdata,file = '../SCTB/refdata.RData')
+#load('../SCTB/refdata.RData')
+#refdata@colData@rownames
+#unique(refdata$label.main)
+testdata <- GetAssayData(scRNA1, slot="data")
+###开始用 singler 分析
+library(SingleR)
+?SingleR
+predictions <- SingleR(test = testdata, ref = refdata, labels =
+refdata$label.main)
+table(predictions$labels)
+predictions@listData[['scores']][1:5,1:5]
+###制作细胞类型的注释文件
+celltype=data.frame(cell=rownames(scRNA1@meta.data),seurat=scRNA1@meta.
+data$seurat_clusters,
+predict=predictions$labels)#得到 seurat 中编号与预测标
+签之间的关系
+rownames(celltype)=celltype$cell
+celltype=celltype[,2:3]
+sort(table(celltype[,1]))
+table(celltype[,1:2])
+#把每簇细胞最多的类型作为该簇细胞类型
+lalala <- as.data.frame(table(celltype[,1:2]))
+finalmap <- lalala %>% group_by(seurat) %>% top_n(n = 1, wt = Freq)#找
+出每种 seurat_cluster 注释比例最高的对应类型
+finalmap2 <-finalmap[order(finalmap$seurat),]$predict#找到 seurat 中 0：n
+的对应预测细胞类型
+print(finalmap2)
+testname <- scRNA1
+new.cluster.ids <- as.character(finalmap2)
+names(new.cluster.ids) <- levels(testname)
+testname <- RenameIdents(testname, new.cluster.ids)
+p1<- DimPlot(testname,label = T)
+p2<-DimPlot(testname,group.by = 'seurat_clusters',label = T)
+p1+p2
+#上皮细胞
+Marker1= c('CDH1','EPCAM','ESR1','KRT18','KRT8')
+DotPlot(scRNA1,features=Marker1)
+VlnPlot(scRNA1,features = Marker1,pt.size = 0,ncol = 10)
+FeaturePlot(scRNA1,reduction='umap', features = Marker1 )
+#T cell
+Marker2= c('TRBC2','CD3D','CD3G','CD3E','IL7R')
+DotPlot(scRNA1,features=Marker2)
+VlnPlot(scRNA1,features = Marker2,pt.size = 0,ncol = 10)
+FeaturePlot(scRNA1, reduction='umap',features = Marker2 )
+#提取上皮细胞和 T 细胞并加入到 metadata
+View(scRNA1@meta.data)
+scRNA1@meta.data$celltype=celltype$predict
+p3<-DimPlot(scRNA1,group.by = 'seurat_clusters',label = T)
+p4<-DimPlot(scRNA1,group.by = 'celltype',label = T)
+p3+p4
+scRNA2 <- subset(scRNA1, subset= celltype=='Epithelial_cells' |
+celltype=='T_cells')
+View(scRNA2@meta.data)
+save(scRNA2,file = '../SCTB/scRNA3.RData')
+save.image('../SCTB/BSCTpipeline.RData')
+7. 拷贝数变异推断：
+Sys.setenv(LANGUAGE = "en")
+options(stringsAsFactors = FALSE)
+rm(list=ls())
+setwd("/home/bsb/Documents/graduation-design/scRNA/SCTB/")
+set.seed(2023)
+load('scRNA3.RData')
+#载入包
+library(Seurat)
+library(infercnv)
+library(dplyr)
+#再聚类
+scRNA2 <- SCTransform(scRNA2, vars.to.regress = "percent.mt", verbose =
+FALSE)
+scRNA2 <- RunPCA(scRNA2, features = VariableFeatures(scRNA2))
+ElbowPlot(scRNA2, ndims=50, reduction="pca")
+pc.num=1:20
+scRNA2 <- FindNeighbors(scRNA2, dims = pc.num)
+library(clustree)
+objB=scRNA2
+objB<-FindClusters(objB,resolution=seq(0.1,1.2,by=0.05))
+clustree(objB)
+scRNA2 <- FindClusters(scRNA2, resolution = 0.2)
+scRNA2 = RunUMAP(scRNA2, dims = pc.num)
+View(scRNA2@meta.data)
+a<-DimPlot(scRNA2, reduction = "umap",group.by='celltype',label = TRUE)
+b<-DimPlot(scRNA2,reduction = 'umap',group.by = 'SCT_snn_res.0.2',label
+= T)
+a+b
+#上皮细胞
+Marker1= c('CDH1','EPCAM','ESR1','KRT18','KRT8')
+DotPlot(scRNA2,features=Marker1)
+VlnPlot(scRNA2,features = Marker1,pt.size = 0,ncol = 10)
+FeaturePlot(scRNA2,reduction='umap', features = Marker1 )
+#T cell
+Marker2= c('TRBC2','CD3D','CD3G','CD3E','IL7R')
+DotPlot(scRNA2,features=Marker2)
+VlnPlot(scRNA2,features = Marker2,pt.size = 0,ncol = 10)
+FeaturePlot(scRNA2, reduction='umap',features = Marker2 )
+pos=read.table("./hg38_gencode_v27.txt")
+pos=subset(pos,V2!='chrY')
+table(pos$V2)
+#pos1=read.table('human.gene(1)(2).positions')
+#删除重复基因名
+#pos1=distinct(pos,V7,.keep_all = TRUE)
+#position 重排序
+#rownames(pos1)=pos1$V7
+#pos2=select(pos1,V7,V2,V3,V4)
+#View(pos2)
+write.table(pos, 'geneLocate.txt', row.names=F, col.names=F, sep='\t')
+#提取信息
+exprMatrix <- as.matrix(GetAssayData(scRNA2, slot='counts'))
+cellAnnota <- subset(scRNA2@meta.data, select='SCT_snn_res.0.2')
+groupFiles='groupFiles.txt'
+dim(exprMatrix)
+write.table(cellAnnota,file =" groupFiles.txt",sep = '\t',col.names = F)
+#创建 infercnv 对象,参考数据取平均
+infercnv_obj = CreateInfercnvObject(raw_counts_matrix=exprMatrix,
+annotations_file=" groupFiles.txt",
+delim="\t",
+gene_order_file= "geneLocate.txt",
+ref_group_names=c('2','4'))
+infercnv_obj = infercnv::run(infercnv_obj,
+cutoff=0.1, # use 1 for smart-seq, 0.1 for
+10x-genomics
+out_dir= 'cnv1/' , # dir is auto-created for
+storing outputs
+cluster_by_groups=T, # cluster_by_groups：
+先区分细胞来源，再做层次聚类
+hclust_method="ward.D2", plot_steps=F,
+HMM=FALSE,
+denoise = TRUE)
+##区分恶性细胞
+grp=read.table("cnv1/infercnv.observation_groupings.txt",sep =
+"",header = T)
+obs=read.table("cnv1/infercnv.observations.txt",header = T,check.names
+=F)
+max(obs)
+min(obs)
+obs[obs>0.8 & obs<0.9]=2
+obs[obs>=0.9 & obs<0.93]=1
+obs[obs>=0.93 & obs<1.07]=0
+obs[obs>=1.07 & obs<1.1]=1
+obs[obs>=1.1 & obs<1.2]=2
+scores=as.data.frame(colSums(obs))
+scores$cluster=grp$Annotation.Group
+colnames(scores)=c("score","cluster")
+library(ggpubr)
+ggboxplot(scores,"cluster","score",fill = "cluster")
+#查看 scores 的 cluster 对应的 scRNA1 的 cluster
+View(scRNA2@meta.data)
+table(scRNA2@meta.data$seurat_clusters)
+table(scores$cluster) #1 和 3 差别比较大,对应 0 和 3
+?FindMarkers
+cluster0 <- subset(scRNA2, idents = 0)
+cluster3 <- subset(scRNA2, idents = 3)
+diffgene <- FindMarkers(object = scRNA2, ident.1 = 0, ident.2 = 3,min.pct
+= 0.25,logfc.threshold = 0.5,test.use = 'roc')
+#排除线粒体基因
+idx <- !grepl("^MT-", rownames(diffgene))
+df_new <- diffgene[idx,]
+normal=subset(df_new,avg_log2FC>0)
+cancer=subset(df_new,avg_log2FC<0)
+save(df_new,file='df_new.RData')
+save.image('./infercnv.RData')
+save(cancer,file = 'cancer.RData')
+save(normal,file="normal.RData")
+#log>0 非恶性，log<0 恶性
+nor=AverageExpression(object = cluster0,features = 'CADM2')
+nor
+can=AverageExpression(object = cluster3,features = 'CADM2')
+can
+8.cox 分析：
+Sys.setenv(LANGUAGE = "en")
+options(stringsAsFactors = FALSE)
+rm(list=ls())
+setwd("/home/bsb/Documents/graduation-design/cox/")
+library(data.table)
+set.seed(2023)
+#提取癌症标记物
+load('../bulk/RobustRank/cancersign.RData')
+load('../bulk/RobustRank/normalsign.RData')
+load('../scRNA/SCTB/df_new.RData')
+cancersign=cancersign[c(1:100),]
+normalsign=normalsign[c(1:100),]
+bulksign=rbind(cancersign,normalsign)
+scsign=df_new
+gene=bulksign[,1]
+gene2=rownames(scsign)
+gene3=c(gene,gene2)
+intersect(gene,gene2)
+gene4=unique(gene3)
+#获取标准化后的数据,过滤掉不符合规定的基因
+load('../bulk/TCGABRCA/mRNA_exprset_norm.RData')
+exp=mRNA_exprSet[gene4,]
+exp=as.data.frame(t(exp))
+#提取生存信息
+survive=fread('TCGA-BRCA.survival.tsv')
+#查看生存曲线样本情况
+name=survive[,1]
+table(substring(name$sample,14,15))
+survive$status <-
+ifelse(substring(name$sample,14,15)=="11","normal","cancer")
+survive=subset(survive,status=='cancer')
+name=survive[,1]
+table(substring(name$sample,14,15))
+#去除重复病人
+colnames(survive)[3]='pitient'
+library(dplyr)
+survive2=distinct(survive,pitient,.keep_all = T)
+survive3=survive2[,c(1,4,2)]
+#合并生存和表达矩阵
+survive3=as.data.frame(survive3)
+exp2=merge(survive3,exp,by.x=1,by.y=0)
+exp2[,"OS.time"]=exp2[,"OS.time"]/365
+#分组
+library(caret)
+group=createDataPartition(y=exp2[,2],p=0.7,list=F)
+train=exp2[group,]
+test=exp2[-group,]
+#看一下
+prop.table(table(train$OS))
+prop.table(table(test$OS))
+prop.table(table(train$OS.time))
+prop.table(table(test$OS.time))
+#单因素 cox 回归分析
+library(survival)
+coxscore=data.frame()
+for (i in colnames(train)[4:ncol(train)]) {
+cox<-coxph(Surv(OS.time,OS)~train[,i],data=train)
+coxsummary=summary(cox)
+coxscore=rbind(coxscore,cbind(gene=i,HR=coxsummary$coefficients[,'exp(
+coef)'],
+z=coxsummary$coefficients[,'z'],
+pvalue=coxsummary$coefficients[,'Pr(>|z|)']))
+}
+coxscoreall=coxscore
+coxscore=subset(coxscore,pvalue<0.05)
+intersect(coxscore$gene,intersect(gene,gene2))
+save(coxscore,file='coxscore.RData')
+save(train,file='train.RData')
+save(test,file='test.RData')
+#制作多因素 cox 分析输入文件
+coxgene=coxscore[,1]
+colname=colnames(train)[1:3]
+colname2=c(colname,coxgene)
+multiexp=train[,colname2]
+rownames(multiexp)=multiexp$sample
+multiexp=multiexp[,-1]
+#多因素 cox
+cox2<-coxph(Surv(OS.time,OS)~.,data=multiexp)
+cox2=step(cox2,direction = 'both')
+cox2
+cox2$assign
+b=cox2$assign
+b=as.character(names(b))
+b
+intersect(gene3,b)
+intersect(gene,b)
+intersect(gene2,b)
+can=cancersign[,1]
+intersect(can,b)
+nor=normalsign[,1]
+intersect(nor,b)
+sccan=subset(df_new,avg_log2FC<0)
+sccan2=rownames(sccan)
+intersect(sccan2,b)
+scnor=subset(df_new,avg_log2FC>0)
+scnor2=rownames(scnor)
+intersect(scnor2,b)
+coxscore2=subset(coxscore,gene%in%b)
+#内部验证
+rownames(test)=test[,1]
+test=test[,-1]
+riskscore=predict(cox2,type='risk',newdata = test)
+risk=as.vector(ifelse(riskscore>median(riskscore),'hign','low'))
+write.table(cbind(id=rownames(cbind(test[,1:2],riskscore,risk)),cbind(
+test[,1:2],riskscore,risk)),file="risk0.txt",sep="\t",quote=F,row.na
+mes=F)
+#生存分析
+risk2=read.table("risk0.txt",header=T,sep="\t")
+diff=survdiff(Surv(OS.time, OS) ~risk,data = risk2)
+pValue=1-pchisq(diff$chisq,df=1)
+diff
+fit <- survfit(Surv(OS.time, OS) ~ risk, data = risk2)
+summary(fit) #查看五年生存率
+pdf(file="survival.pdf")
+plot(fit, lty = 2:3,col=c("red","blue"),xlab="time
+(year)",ylab="survival rate",
+main=paste("survival curve (p=", pValue ,")",sep=""),mark.time=T)
+legend("topright", c("high risk", "low risk"), lty = 2:3,
+col=c("red","blue"))
+dev.off()
+#绘制 roc 曲线
+library(survivalROC)
+risk3=read.table("risk0.txt",header=T,sep="\t",check.names=F,row.names
+=1)
+pdf(file="ROC.pdf")
+par(oma=c(0.5,1,0,1),font.lab=1.5,font.axis=1.5)
+roc=survivalROC(Stime=risk3$OS.time, status=risk3$OS, marker =
+risk3$riskscore,
+predict.time =5, method="KM")
+plot(roc$FP, roc$TP, type="l", xlim=c(0,1), ylim=c(0,1),col='red',
+xlab="False positive rate", ylab="True positive rate",
+main=paste("ROC curve (", "AUC = ",round(roc$AUC,3),")"),
+lwd = 2, cex.main=1.3, cex.lab=1.2, cex.axis=1.2, font=1.2)
+abline(0,1)
+dev.off()
+m1=round(median(risk2$riskscore),3)
+#外部验证
+setwd("/home/bsb/Documents/graduation-design/validation/")
+library(GEOquery)
+gset= getGEO('GSE202203', destdir=".",getGPL =T)
+show(gset)
+gset=gset[[1]]
+#临床信息
+pdata=pData(gset)
+View(pdata)
+pdata=pdata[,c(1,26,27,29,30)]
+#表达
+ex=fread('GSE202203_TPM_Raw_gene_3207.tsv.gz')
+a=as.data.frame(b)
+ex2=merge(a,ex,by.x=1,by.y=1)
+rownames(ex2)=ex2[,1]
+ex2=ex2[,-c(1)]
+ex2=log(ex2+0.1)
+ex3=as.data.frame(t(ex2))
+test2=merge(pdata,ex3,by.x=1,by.y=0)
+rownames(test2)=test2[,1]
+test2=test2[,-1]
+test2os=test2[,-(3:4)]
+test2rfs=test2[,-(1:2)]
+colnames(test2os)[1:2]=c('fultime','fulstate')
+colnames(test2rfs)[1:2]=c('rfstime','rfs')
+#os 更改格式
+a1=strsplit(test2os$fultime,split = ": ",fixed = T) #T 表示精准匹配
+t1 = sapply(a1,function(x){x[2]})
+test2os$fultime=t1
+b1=strsplit(test2os$fulstate,split = ": ",fixed = T) #T 表示精准匹配
+s1= sapply(b1,function(x){x[2]})
+test2os$fulstate=s1
+test2os=subset(test2os,fulstate!='NA')
+#rfs 格式更改
+a2=strsplit(test2rfs$rfstime,split = ": ",fixed = T) #T 表示精准匹配
+t2 = sapply(a2,function(x){x[2]})
+test2rfs$rfstime=t2
+b2=strsplit(test2rfs$rfs,split = ": ",fixed = T) #T 表示精准匹配
+s2= sapply(b2,function(x){x[2]})
+test2rfs$rfs=s2
+test2rfs=subset(test2rfs,rfstime!='NA')
+#验证 OS
+riskscore2=predict(cox2,type='risk',newdata = test2os)
+risk4=as.vector(ifelse(riskscore2>median(riskscore2),'hign','low'))
+write.table(cbind(id=rownames(cbind(test2os[,1:2],riskscore2,risk4)),c
+bind(test2os[,1:2],riskscore2,risk4)),file="risk.txt",sep="\t",quote
+=F,row.names=F)
+#生存分析
+risk5=read.table("risk.txt",header=T,sep="\t")
+diff2=survdiff(Surv(fultime, fulstate) ~risk4,data = risk5)
+pValue2=1-pchisq(diff2$chisq,df=1)
+diff2
+fit2 <- survfit(Surv(fultime, fulstate) ~ risk4, data = risk5)
+summary(fit2) #查看五年生存率
+pdf(file="survival2.pdf")
+plot(fit2, lty = 2:3,col=c("red","blue"),xlab="time
+(year)",ylab="survival rate",
+main=paste("survival curve (p=", pValue2 ,")",sep=""),mark.time=T)
+legend("topright", c("high risk", "low risk"), lty = 2:3,
+col=c("red","blue"))
+dev.off()
+#绘制 roc 曲线
+library(survivalROC)
+risk6=read.table("risk.txt",header=T,sep="\t",check.names=F,row.names=
+1)
+pdf(file="ROC2.pdf")
+par(oma=c(0.5,1,0,1),font.lab=1.5,font.axis=1.5)
+roc2=survivalROC(Stime=risk6$fultime, status=risk6$fulstate, marker =
+risk6$riskscore2,
+predict.time =5, method="KM")
+plot(roc2$FP, roc2$TP, type="l", xlim=c(0,1), ylim=c(0,1),col='red',
+xlab="False positive rate", ylab="True positive rate",
+main=paste("ROC curve (", "AUC = ",round(roc2$AUC,3),")"),
+lwd = 2, cex.main=1.3, cex.lab=1.2, cex.axis=1.2, font=1.2)
+abline(0,1)
+dev.off()
+m2=round(median(risk5$riskscore2),3)
+#验证 RFS
+riskscore3=predict(cox2,type='risk',newdata = test2rfs)
+risk7=as.vector(ifelse(riskscore3>median(riskscore3),'hign','low'))
+write.table(cbind(id=rownames(cbind(test2rfs[,1:2],riskscore3,risk7)),
+cbind(test2rfs[,1:2],riskscore3,risk7)),file="risk2.txt",sep="\t",qu
+ote=F,row.names=F)
+#生存分析
+risk8=read.table("risk2.txt",header=T,sep="\t")
+diff3=survdiff(Surv(rfstime, rfs) ~risk7,data = risk8)
+pValue3=1-pchisq(diff3$chisq,df=1)
+diff3
+fit3 <- survfit(Surv(rfstime, rfs) ~ risk7, data = risk8)
+summary(fit3) #查看五年生存率
+pdf(file="survival3.pdf")
+plot(fit3, lty = 2:3,col=c("red","blue"),xlab="time
+(year)",ylab="survival rate",
+main=paste("survival curve (p=", pValue3 ,")",sep=""),mark.time=T)
+legend("topright", c("high risk", "low risk"), lty = 2:3,
+col=c("red","blue"))
+dev.off()
+#绘制 roc 曲线
+library(survivalROC)
+risk9=read.table("risk2.txt",header=T,sep="\t",check.names=F,row.names
+=1)
+pdf(file="ROC3.pdf")
+par(oma=c(0.5,1,0,1),font.lab=1.5,font.axis=1.5)
+roc3=survivalROC(Stime=risk9$rfstime, status=risk9$rfs, marker =
+risk9$riskscore3,
+predict.time =5, method="KM")
+plot(roc3$FP, roc3$TP, type="l", xlim=c(0,1), ylim=c(0,1),col='red',
+xlab="False positive rate", ylab="True positive rate",
+main=paste("ROC curve (", "AUC = ",round(roc3$AUC,3),")"),
+lwd = 2, cex.main=1.3, cex.lab=1.2, cex.axis=1.2, font=1.2)
+abline(0,1)
+dev.off()
+m3=round(median(risk8$riskscore),3)
